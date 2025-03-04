@@ -142,7 +142,7 @@ static bw_tokenarg_t *bw_gettokensfromhtml(char const *html) {
 			case '"':
 			case '/':
 				if (in)
-					actual = CHAR2TOK_MAP[*html];
+					actual = CHAR2TOK_MAP[(int)*html];
 				else
 					(void)bwvec_pushnum(&buf, *html);
 				break;
@@ -258,14 +258,14 @@ bw_html_t *bw_nodenew(char const *type) {
 	return node;
 }
 
-void bw_nodeadopt(bw_html_t *node, bw_html_t *child) {
+static void bw_nodeadopt(bw_html_t *node, bw_html_t *child) {
 	if (child == NULL)
 		return;
 	child->parent = node;
 	(void)bwvec_pushptr(&node->children, child);
 }
 
-void bw_nodeclose(bw_html_t *node) {
+static void bw_nodeclose(bw_html_t *node) {
 	for (size_t n = 0; n < bwvec_size(node->props); ++n) {
 		free(node->props[n].key);
 		free(node->props[n].value);
@@ -283,7 +283,7 @@ void bw_nodeclose(bw_html_t *node) {
 }
 
 // stringelem ::= TOKQUOTE TOKSYM TOKQUOTE
-int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
+static int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
 	if ((*toks)[0].tok != TOKQUOTE ||
 			(*toks)[1].tok != TOKSYM ||
 			(*toks)[2].tok != TOKQUOTE)
@@ -294,7 +294,7 @@ int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
 }
 
 // keyval ::= TOKSYM TOKEQUAL <stringelem>
-int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
+static int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
 	bw_htmlprop_t prop;
 	char *tmp;
 
@@ -306,12 +306,11 @@ int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
 		return -1; // error: not string
 	prop.key = strdup(tmp);
 	(void)bwvec_pushdata(&node->props, &prop);
-	printf("here its %s\n", node->type ? node->type : "root");
 	return 0;
 }
 
 // bloc ::= TOKOPEN TOKSYM [<keyval>] TOKCLOSE
-int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks) {
+static int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks, int *in) {
 	bw_html_t *child;
 
 	if ((*toks)[0].tok != TOKOPEN || (*toks)[1].tok != TOKSYM)
@@ -319,6 +318,10 @@ int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks) {
 	child = bw_nodenew((*toks)[1].arg);
 	*toks += 2;
 	while (bw_parsekeyval(child, toks) == 0);
+	if ((**toks).tok == TOKSLASH) {
+		*in = 0;
+		++*toks;
+	}
 	if ((**toks).tok != TOKCLOSE) {
 		bw_nodeclose(child);
 		return -1; // error: bloc not closed by '>'
@@ -329,7 +332,7 @@ int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks) {
 }
 
 // endbloc ::= TOKOPEN TOKSLASH TOKSYM TOKCLOSE
-int bw_parseendbloc(bw_html_t *node, bw_tokenarg_t const **toks) {
+static int bw_parseendbloc(bw_html_t *node, bw_tokenarg_t const **toks) {
 	if ((*toks)[0].tok != TOKOPEN ||
 			(*toks)[1].tok != TOKSLASH ||
 			(*toks)[2].tok != TOKSYM ||
@@ -342,7 +345,10 @@ int bw_parseendbloc(bw_html_t *node, bw_tokenarg_t const **toks) {
 }
 
 // something ::= TOKSYM | <endbloc> | <bloc>
-int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
+static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
+	int go_in = 1;
+	bw_html_t *innode;
+
 	if ((**toks).tok == TOKEND)
 		return 0;
 	if ((**toks).tok == TOKSYM) {
@@ -352,11 +358,11 @@ int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 	}
 	if (bw_parseendbloc(node, toks) == 0)
 		return bw_parsesomething(node->parent, toks);
-	if (bw_parsebloc(node, toks) == 0)
-		return bw_parsesomething(
-				node->children[bwvec_size(node->children) - 1],
-				toks
-		);
+	if (bw_parsebloc(node, toks, &go_in) == 0) {
+		innode = go_in ?
+			node->children[bwvec_size(node->children) - 1] : node;
+		return bw_parsesomething(innode, toks);
+	}
 	return -1;
 }
 
@@ -365,7 +371,7 @@ static bw_html_t *bw_gethtmlfromtokens(bw_tokenarg_t const *toks) {
 
 	if (root == NULL)
 		return NULL;
-	printf("> %d\n", bw_parsesomething(root, &toks));
+	printf("Parsing ended with %d\n", bw_parsesomething(root, &toks));
 	return root;
 }
 
@@ -387,7 +393,7 @@ static void bw_display_tree(bw_html_t const *tree, int off) {
 
 int main(void) {
 	bw_tokenarg_t *tokens;
-	char *content = "<html a=\"b\"><h1>title</h1><p>hello</p></html>";
+	char *content = "<html a=\"b\" c = \"d\"><prout/><h1>title</h1><p>hello</p></html>";
 
 	//if (bw_getfilecontent(&content, "example.html") == -1)
 	//	return 1;
@@ -400,7 +406,6 @@ int main(void) {
 	display_tokens(tokens);
 	
 	bw_html_t *node = bw_gethtmlfromtokens(tokens);
-	printf("%zu\n", bwvec_size(node->children));
 	bw_display_tree(node, 0);
 	bw_nodeclose(node);
 
