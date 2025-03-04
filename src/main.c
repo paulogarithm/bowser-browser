@@ -283,48 +283,69 @@ void bw_nodeclose(bw_html_t *node) {
 }
 
 // stringelem ::= TOKQUOTE TOKSYM TOKQUOTE
-int bw_parsestringelem() {
-	return -1;
+int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
+	if ((*toks)[0].tok != TOKQUOTE ||
+			(*toks)[1].tok != TOKSYM ||
+			(*toks)[2].tok != TOKQUOTE)
+		return -1;
+	prop->value = strdup((*toks)[1].arg);
+	*toks += 3;
+	return 0;
 }
 
 // keyval ::= TOKSYM TOKEQUAL <stringelem>
-int bw_parsekeyval() {
-	return -1;
+int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
+	bw_htmlprop_t prop;
+	char *tmp;
+
+	if ((*toks)[0].tok != TOKSYM || (*toks)[1].tok != TOKEQUAL)
+		return -1;
+	tmp = (**toks).arg;
+	*toks += 2;
+	if (bw_parsestringelem(&prop, toks) == -1)
+		return -1; // error: not string
+	prop.key = strdup(tmp);
+	(void)bwvec_pushdata(&node->props, &prop);
+	printf("here its %s\n", node->type ? node->type : "root");
+	return 0;
 }
 
 // bloc ::= TOKOPEN TOKSYM [<keyval>] TOKCLOSE
 int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks) {
-	if ((*toks)[0].tok == TOKOPEN &&
-			(*toks)[1].tok == TOKSYM &&
-			(*toks)[2].tok == TOKCLOSE) {
-		//printf("IT WAS A BLOC %s !\n", (*toks)[1].arg);
-		bw_nodeadopt(node, bw_nodenew((*toks)[1].arg));
-		(*toks) += 3;
-		return 0;
+	bw_html_t *child;
+
+	if ((*toks)[0].tok != TOKOPEN || (*toks)[1].tok != TOKSYM)
+		return -1;
+	child = bw_nodenew((*toks)[1].arg);
+	*toks += 2;
+	while (bw_parsekeyval(child, toks) == 0);
+	if ((**toks).tok != TOKCLOSE) {
+		bw_nodeclose(child);
+		return -1; // error: bloc not closed by '>'
 	}
-	return -1;
+	bw_nodeadopt(node, child);
+	++*toks;
+	return 0;
 }
 
 // endbloc ::= TOKOPEN TOKSLASH TOKSYM TOKCLOSE
 int bw_parseendbloc(bw_html_t *node, bw_tokenarg_t const **toks) {
-	if ((*toks)[0].tok == TOKOPEN &&
-			(*toks)[1].tok == TOKSLASH &&
-			(*toks)[2].tok == TOKSYM &&
-			(*toks)[3].tok == TOKCLOSE) {
-		//printf("IT WAS A END BLOC OF %s !\n", (*toks)[2].arg);
-		(*toks) += 4;
-		return 0;
-	}
-	return -1;
+	if ((*toks)[0].tok != TOKOPEN ||
+			(*toks)[1].tok != TOKSLASH ||
+			(*toks)[2].tok != TOKSYM ||
+			(*toks)[3].tok != TOKCLOSE)
+		return -1;
+	if (strcmp(node->type, (*toks)[2].arg))
+		return -1; // error: expected same node
+	(*toks) += 4;
+	return 0;
 }
 
 // something ::= TOKSYM | <endbloc> | <bloc>
 int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
-	//printf("IM IN %s...\n", node->type ? node->type : "root");
 	if ((**toks).tok == TOKEND)
 		return 0;
 	if ((**toks).tok == TOKSYM) {
-		//printf("IT WAS A SYMBOL %s !\n", (**toks).arg);
 		node->data = strdup((**toks).arg);
 		++(*toks);
 		return bw_parsesomething(node, toks);
@@ -336,7 +357,7 @@ int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 				node->children[bwvec_size(node->children) - 1],
 				toks
 		);
-	return 0;
+	return -1;
 }
 
 static bw_html_t *bw_gethtmlfromtokens(bw_tokenarg_t const *toks) {
@@ -350,10 +371,12 @@ static bw_html_t *bw_gethtmlfromtokens(bw_tokenarg_t const *toks) {
 
 #define REPEAT(s, n) for (int i = 0; i < n; ++i) printf("%s", s)
 static void bw_display_tree(bw_html_t const *tree, int off) {
-	REPEAT("  ", off);
+	REPEAT("   ", off);
 	printf("%s:", tree->type ? tree->type : "root");
 	if (tree->data)
 		printf(" (%s)", tree->data);
+	if (!bwvec_empty(tree->props))
+		printf(" [%zu props]", bwvec_size(tree->props));
 	puts("");
 	for (size_t n = 0; n < bwvec_size(tree->children); ++n)
 		bw_display_tree(tree->children[n], off + 1);
@@ -364,7 +387,7 @@ static void bw_display_tree(bw_html_t const *tree, int off) {
 
 int main(void) {
 	bw_tokenarg_t *tokens;
-	char *content = "<html><h1>title</h1><p>hello</p></html>";
+	char *content = "<html a=\"b\"><h1>title</h1><p>hello</p></html>";
 
 	//if (bw_getfilecontent(&content, "example.html") == -1)
 	//	return 1;
