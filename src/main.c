@@ -92,6 +92,7 @@ typedef enum {
 	TOKSYM,		// anything else
 	TOKQUOTE,	// "
 	TOKEQUAL, 	// =
+	TOKEXCLAM,	// !
 	TOKEND,
 } bw_token_t;
 
@@ -99,6 +100,7 @@ static bw_token_t const CHAR2TOK_MAP[] = { // a waste of memory
 	['='] = TOKEQUAL,
 	['/'] = TOKSLASH,
 	['"'] = TOKQUOTE,
+	['!'] = TOKEXCLAM,
 };
 
 static char const *const TOK2STR_MAP[] = {
@@ -108,6 +110,7 @@ static char const *const TOK2STR_MAP[] = {
 	[TOKSYM] = "TOKSYM",
 	[TOKQUOTE] = "\"",
 	[TOKEQUAL] = "=",
+	[TOKEXCLAM] = "!",
 	[TOKEND] = "END"
 };
 
@@ -124,6 +127,7 @@ static bw_tokenarg_t *bw_gettokensfromhtml(char const *html) {
 	bw_tokenarg_t tmp = { .tok = TOKEND, .arg = NULL };
 	bw_token_t actual;
 	bool in = false;
+	bool instr = false;
 
 	if (toks == NULL)
 		return NULL;
@@ -141,15 +145,19 @@ static bw_tokenarg_t *bw_gettokensfromhtml(char const *html) {
 			case '=':
 			case '"':
 			case '/':
-				if (in)
+			case '!':
+				// c'est un token si c'est à linterieur + pas dans une string || 
+				if ((in && !instr) || (in && *html == '"'))
 					actual = CHAR2TOK_MAP[(int)*html];
 				else
 					(void)bwvec_pushnum(&buf, *html);
+				if (*html == '"')
+					instr = !instr;
 				break;
 			case ' ':
 			case '\n':
 			case '\t':
-				if (in)
+				if (in && !instr)
 					actual = TOKSYM;
 				else if (!bwvec_empty(buf))
 					(void)bwvec_pushnum(&buf, *html);
@@ -344,6 +352,17 @@ static int bw_parseendbloc(bw_html_t *node, bw_tokenarg_t const **toks) {
 	return 0;
 }
 
+// useless ::= TOKOPEN TOKEXCLAM ... TOKCLOSE
+static int bw_parseuseless(bw_tokenarg_t const **args) {
+	if ((*args)[0].tok != TOKOPEN || (*args)[1].tok != TOKEXCLAM)
+		return -1;
+	*args += 2;
+	for (; (**args).tok != TOKCLOSE; ++*args);
+	++*args;
+	printf(">>> %s\n", TOK2STR_MAP[(**args).tok]);
+	return 0;
+}
+
 // something ::= TOKSYM | <endbloc> | <bloc>
 static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 	int go_in = 1;
@@ -356,6 +375,8 @@ static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 		++(*toks);
 		return bw_parsesomething(node, toks);
 	}
+	if (bw_parseuseless(toks) == 0)
+		return bw_parsesomething(node, toks);
 	if (bw_parseendbloc(node, toks) == 0)
 		return bw_parsesomething(node->parent, toks);
 	if (bw_parsebloc(node, toks, &go_in) == 0) {
@@ -380,7 +401,7 @@ static void bw_display_tree(bw_html_t const *tree, int off) {
 	REPEAT("   ", off);
 	printf("%s:", tree->type ? tree->type : "root");
 	if (tree->data)
-		printf(" (%s)", tree->data);
+		printf(" (...)");//, tree->data);
 	if (!bwvec_empty(tree->props))
 		printf(" [%zu props]", bwvec_size(tree->props));
 	puts("");
@@ -393,16 +414,15 @@ static void bw_display_tree(bw_html_t const *tree, int off) {
 
 int main(void) {
 	bw_tokenarg_t *tokens;
-	char *content = "<html a=\"b\" c = \"d\"><prout/><h1>title</h1><p>hello</p></html>";
+	char *content; //= "<html a=\"b\" c = \"d\"><prout/><h1>title</h1><p>hello</p></html>";
 
-	//if (bw_getfilecontent(&content, "example.html") == -1)
-	//	return 1;
+	if (bw_getfilecontent(&content, "example.html") == -1)
+		return 1;
 	tokens = bw_gettokensfromhtml(content);
 	if (tokens == NULL) {
-		//free(content);
+		free(content);
 		return 1;
 	}
-	printf("%p\n", tokens);
 	display_tokens(tokens);
 	
 	bw_html_t *node = bw_gethtmlfromtokens(tokens);
@@ -412,7 +432,7 @@ int main(void) {
 	for (size_t n = 0; n < bwvec_size(tokens); ++n)
 		if (tokens[n].tok == TOKSYM && tokens[n].arg != NULL)
 			free(tokens[n].arg);
-	//free(content);
+	free(content);
 	bwvec_close(tokens);
 	return 0;
 }
