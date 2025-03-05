@@ -83,6 +83,26 @@ int bwvec_empty(void const *v) {
 	return (((bwvecmeta_t const *)v - 1)->nmemb == 0);
 }
 
+int bwvec_extendoff(void *vptr, void *membs, size_t moremembs, size_t off) {
+	bwvecmeta_t *v = *(bwvecmeta_t **)vptr - 1;
+
+	if (v->maxmemb < v->nmemb + moremembs) {
+		v->maxmemb += moremembs;
+		v = realloc(v, sizeof(bwvecmeta_t) + v->elemsize * v->maxmemb);
+		if (v == NULL)
+		return -1;
+	}
+	(void)memcpy(((char *)(v + 1)) + (v->nmemb * v->elemsize) - off, membs, v->elemsize * moremembs);
+	v->nmemb += moremembs;
+	*(void **)vptr = v + 1;
+	return 0;
+}
+
+int bwvec_extend(void *vptr, void *membs, size_t moremembs) {
+	return bwvec_extendoff(vptr, membs, moremembs, 0);
+}
+
+
 // tokenizer
 
 typedef enum {
@@ -366,7 +386,12 @@ static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 	if ((**toks).tok == TOKEND)
 		return 0;
 	if ((**toks).tok == TOKSYM) {
-		node->data = strdup((**toks).arg);
+		if (node->data != NULL)
+			(void)bwvec_extendoff(&node->data, (**toks).arg, strlen((**toks).arg) + 1, 1);
+		else {
+			node->data = BWVEC_NEW(char);
+			(void)bwvec_extend(&node->data, (**toks).arg, strlen((**toks).arg) + 1);
+		}
 		++(*toks);
 		return bw_parsesomething(node, toks);
 	}
@@ -445,6 +470,7 @@ bw_html_t *bw_htmlfromfile(char const *path) {
 
 void bw_htmlclose(bw_html_t *node) {
 	size_t size = bwvec_size(node->props);
+
 	for (size_t n = 0; n < size; ++n) {
 		free(node->props[n].key);
 		if (node->props[n].value != NULL)
@@ -454,19 +480,18 @@ void bw_htmlclose(bw_html_t *node) {
 	if (node->type != NULL)
 		free(node->type);
 	size = bwvec_size(node->children);
-	for (size_t n = 0; n < size; ++n) {
+	for (size_t n = 0; n < size; ++n)
 		bw_htmlclose(node->children[n]);
-	}
 	bwvec_close(node->children);
 	if (node->data != NULL)
-		free(node->data);
+		bwvec_close(node->data);
 	free(node);
 }
 
 // main
 
 int main(void) {
-	bw_html_t *html = bw_htmlfromfile("google-compliant.html");
+	bw_html_t *html = bw_htmlfromfile("google-really-compliant.html");
 
 	if (html == NULL)
 		return 1;
