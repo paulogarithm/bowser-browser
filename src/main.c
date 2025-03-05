@@ -121,7 +121,7 @@ typedef struct {
 
 // tokenizer
 
-static bw_tokenarg_t *bw_gettokensfromhtml(char const *html) {
+static bw_tokenarg_t *bw_gettokensfromstring(char const *html) {
 	bw_tokenarg_t *toks = BWVEC_NEW(bw_tokenarg_t);
 	char *buf = BWVEC_NEW(char);
 	bw_tokenarg_t tmp = { .tok = TOKEND, .arg = NULL };
@@ -210,8 +210,10 @@ static int bw_getfilecontent(char **buf, char const *file) {
 	return 0;
 }
 
-static void display_tokens(bw_tokenarg_t *args) {
-	for (size_t n = 0; n < bwvec_size(args); ++n) {
+static void display_tokens(bw_tokenarg_t const *args) {
+	size_t size = bwvec_size(args);
+
+	for (size_t n = 0; n < size; ++n) {
 		printf("%s", TOK2STR_MAP[args[n].tok]);
 		if (args[n].tok == TOKSYM)
 			printf("(%s)", args[n].arg ? args[n].arg : "(null)");
@@ -273,22 +275,7 @@ static void bw_nodeadopt(bw_html_t *node, bw_html_t *child) {
 	(void)bwvec_pushptr(&node->children, child);
 }
 
-static void bw_nodeclose(bw_html_t *node) {
-	for (size_t n = 0; n < bwvec_size(node->props); ++n) {
-		free(node->props[n].key);
-		free(node->props[n].value);
-	}
-	bwvec_close(node->props);
-	if (node->type != NULL)
-		free(node->type);
-	for (size_t n = 0; n < bwvec_size(node->children); ++n) {
-		bw_nodeclose(node->children[n]);
-	}
-	bwvec_close(node->children);
-	if (node->data != NULL)
-		free(node->data);
-	free(node);
-}
+void bw_htmlclose(bw_html_t *node);
 
 // stringelem ::= TOKQUOTE TOKSYM TOKQUOTE
 static int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
@@ -331,7 +318,7 @@ static int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks, int *in) {
 		++*toks;
 	}
 	if ((**toks).tok != TOKCLOSE) {
-		bw_nodeclose(child);
+		bw_htmlclose(child);
 		return -1; // error: bloc not closed by '>'
 	}
 	bw_nodeadopt(node, child);
@@ -359,7 +346,6 @@ static int bw_parseuseless(bw_tokenarg_t const **args) {
 	*args += 2;
 	for (; (**args).tok != TOKCLOSE; ++*args);
 	++*args;
-	printf(">>> %s\n", TOK2STR_MAP[(**args).tok]);
 	return 0;
 }
 
@@ -384,20 +370,30 @@ static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 			node->children[bwvec_size(node->children) - 1] : node;
 		return bw_parsesomething(innode, toks);
 	}
+	printf("[failed to in %s, last token is %s.]\n", node->type, TOK2STR_MAP[(**toks).tok]);
 	return -1;
 }
 
 static bw_html_t *bw_gethtmlfromtokens(bw_tokenarg_t const *toks) {
 	bw_html_t *root = bw_nodenew(NULL);
+	int res;
 
 	if (root == NULL)
 		return NULL;
-	printf("Parsing ended with %d\n", bw_parsesomething(root, &toks));
+	display_tokens(toks);
+	res = bw_parsesomething(root, &toks);
+	printf("Result is %d\n", res);
+	//if (res == -1) {
+	//	bw_htmlclose(root);
+	//	return NULL;
+	//}
 	return root;
 }
 
 #define REPEAT(s, n) for (int i = 0; i < n; ++i) printf("%s", s)
 static void bw_display_tree(bw_html_t const *tree, int off) {
+	size_t size = bwvec_size(tree->children);
+
 	REPEAT("   ", off);
 	printf("%s:", tree->type ? tree->type : "root");
 	if (tree->data)
@@ -405,34 +401,66 @@ static void bw_display_tree(bw_html_t const *tree, int off) {
 	if (!bwvec_empty(tree->props))
 		printf(" [%zu props]", bwvec_size(tree->props));
 	puts("");
-	for (size_t n = 0; n < bwvec_size(tree->children); ++n)
+	for (size_t n = 0; n < size; ++n)
 		bw_display_tree(tree->children[n], off + 1);
+}
 
+// api
+
+bw_html_t *bw_htmlfromtext(char const *htmltext) {
+	bw_tokenarg_t *tokens = bw_gettokensfromstring(htmltext);
+	bw_html_t *html;
+	size_t size;
+
+	if (tokens == NULL)
+		return NULL;
+	html = bw_gethtmlfromtokens(tokens);
+	size = bwvec_size(tokens);
+	for (size_t n = 0; n < size; ++n)
+		if (tokens[n].tok == TOKSYM && tokens[n].arg != NULL)
+			free(tokens[n].arg);
+	bwvec_close(tokens);
+	return html;
+}
+
+bw_html_t *bw_htmlfromfile(char const *path) {
+	char *content;
+	bw_html_t *node;
+
+	if (bw_getfilecontent(&content, path) == -1)
+		return NULL;
+	node = bw_htmlfromtext(content);
+	free(content);
+	return node;
+}
+
+void bw_htmlclose(bw_html_t *node) {
+	size_t size = bwvec_size(node->props);
+	for (size_t n = 0; n < size; ++n) {
+		free(node->props[n].key);
+		free(node->props[n].value);
+	}
+	bwvec_close(node->props);
+	if (node->type != NULL)
+		free(node->type);
+	size = bwvec_size(node->children);
+	for (size_t n = 0; n < size; ++n) {
+		bw_htmlclose(node->children[n]);
+	}
+	bwvec_close(node->children);
+	if (node->data != NULL)
+		free(node->data);
+	free(node);
 }
 
 // main
 
 int main(void) {
-	bw_tokenarg_t *tokens;
-	char *content; //= "<html a=\"b\" c = \"d\"><prout/><h1>title</h1><p>hello</p></html>";
+	bw_html_t *html = bw_htmlfromfile("google.html");
 
-	if (bw_getfilecontent(&content, "example.html") == -1)
+	if (html == NULL)
 		return 1;
-	tokens = bw_gettokensfromhtml(content);
-	if (tokens == NULL) {
-		free(content);
-		return 1;
-	}
-	display_tokens(tokens);
-	
-	bw_html_t *node = bw_gethtmlfromtokens(tokens);
-	bw_display_tree(node, 0);
-	bw_nodeclose(node);
-
-	for (size_t n = 0; n < bwvec_size(tokens); ++n)
-		if (tokens[n].tok == TOKSYM && tokens[n].arg != NULL)
-			free(tokens[n].arg);
-	free(content);
-	bwvec_close(tokens);
+	bw_display_tree(html, 0);
+	bw_htmlclose(html);
 	return 0;
 }
