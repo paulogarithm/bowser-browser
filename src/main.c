@@ -279,6 +279,11 @@ void bw_htmlclose(bw_html_t *node);
 
 // stringelem ::= TOKQUOTE TOKSYM TOKQUOTE
 static int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
+	if ((*toks)[0].tok == TOKQUOTE && (*toks)[1].tok == TOKQUOTE) {
+		prop->value = NULL;
+		*toks += 2;
+		return 0;
+	}
 	if ((*toks)[0].tok != TOKQUOTE ||
 			(*toks)[1].tok != TOKSYM ||
 			(*toks)[2].tok != TOKQUOTE)
@@ -288,7 +293,7 @@ static int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
 	return 0;
 }
 
-// keyval ::= TOKSYM TOKEQUAL <stringelem>
+// keyval ::= TOKSYM TOKEQUAL (<stringelem> | TOKSYM)
 static int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
 	bw_htmlprop_t prop;
 	char *tmp;
@@ -298,7 +303,11 @@ static int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
 	tmp = (**toks).arg;
 	*toks += 2;
 	if (bw_parsestringelem(&prop, toks) == -1)
-		return -1; // error: not string
+		if ((*toks)[0].tok == TOKSYM) {
+			prop.value = strdup((*toks)[0].arg);
+			++*toks;
+		} else
+			return -1; // error: not string/sym
 	prop.key = strdup(tmp);
 	(void)bwvec_pushdata(&node->props, &prop);
 	return 0;
@@ -370,7 +379,7 @@ static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 			node->children[bwvec_size(node->children) - 1] : node;
 		return bw_parsesomething(innode, toks);
 	}
-	printf("[failed to in %s, last token is %s.]\n", node->type, TOK2STR_MAP[(**toks).tok]);
+	printf("[failed to in %s, last token is %s, with arg %s.]\n", node->type ? node->type : "root", TOK2STR_MAP[(**toks).tok], (**toks).arg ? (**toks).arg : "null");
 	return -1;
 }
 
@@ -438,7 +447,8 @@ void bw_htmlclose(bw_html_t *node) {
 	size_t size = bwvec_size(node->props);
 	for (size_t n = 0; n < size; ++n) {
 		free(node->props[n].key);
-		free(node->props[n].value);
+		if (node->props[n].value != NULL)
+			free(node->props[n].value);
 	}
 	bwvec_close(node->props);
 	if (node->type != NULL)
@@ -456,7 +466,7 @@ void bw_htmlclose(bw_html_t *node) {
 // main
 
 int main(void) {
-	bw_html_t *html = bw_htmlfromfile("google.html");
+	bw_html_t *html = bw_htmlfromfile("google-compliant.html");
 
 	if (html == NULL)
 		return 1;
