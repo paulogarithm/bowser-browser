@@ -102,6 +102,81 @@ int bwvec_extend(void *vptr, void *membs, size_t moremembs) {
 	return bwvec_extendoff(vptr, membs, moremembs, 0);
 }
 
+// hashmap
+
+typedef struct {
+	char const *key;
+	size_t value;
+} bwhmap_keyval_t;
+
+typedef struct s_bwhmap {
+	//size_t keysize;
+	//size_t valuesize;
+	size_t size;
+	bwhmap_keyval_t **data;
+	size_t(*hashfunc)(char const *, size_t, size_t);
+} bwhmap_t;
+
+//#define BWHMAP_NEW(kt, vt, n) bwhmap_init(sizeof(kt), sizeof(vt), n, bwhmap_hashadler32)
+#define BWHMAP_NEW(n) bwhmap_init(n, bwhmap_hashadler32)
+//#define BWHMAP_HASHKEY(hmap, key) ((hmap)->hashfunc(key, (hmap)->keysize, (hmap)->size)) 
+
+bwhmap_t *bwhmap_init(size_t size, size_t(*f)(char const *, size_t, size_t)) {
+	bwhmap_t *map = malloc(sizeof(bwhmap_t));
+
+	if (map == NULL)
+		return NULL;
+	map->data = malloc(sizeof(void *) * size);
+	for (size_t n = 0; n < size; ++n)
+		map->data[n] = BWVEC_NEW(bwhmap_keyval_t);
+	//map->keysize = keysize;
+	//map->valuesize = valuesize;
+	map->size = size;
+	map->hashfunc = f;
+	return map;
+}
+
+size_t bwhmap_hashadler32(char const *key, size_t keysize, size_t hmapsize) {
+	uint8_t const *buffer = (uint8_t const *)key;
+    uint32_t s1 = 1;
+    uint32_t s2 = 0;
+
+	for (size_t n = 0; n < keysize; n++) {
+		s1 = (s1 + buffer[n]) % 65521;
+		s2 = (s2 + s1) % 65521;
+	}
+	return (size_t)((s2 << 16) | s1) % hmapsize;
+}
+
+void bwhmap_set(bwhmap_t *hmap, char const *key, size_t value) {
+	bwhmap_keyval_t const keyval = { .key = key, .value = value };
+	bwhmap_keyval_t *list = hmap->data[hmap->hashfunc(key, strlen(key), hmap->size)];
+	size_t const size = bwvec_size(list);
+
+	for (size_t n = 0; n < size; ++n)
+		if (strcmp(list[n].key, key) == 0) {
+			list[n].value = value;
+			return;
+		}
+	(void)bwvec_pushdata(&list, &keyval);
+}
+
+size_t *bwhmap_get(bwhmap_t *hmap, void const *key) {
+	bwhmap_keyval_t *list = hmap->data[hmap->hashfunc(key, strlen(key), hmap->size)];
+	size_t size = bwvec_size(list);
+
+	for (size_t n = 0; n < size; ++n)
+		if (strcmp(list[n].key, key) == 0)
+			return &list[n].value;
+	return NULL;
+}
+
+void bwhmap_close(bwhmap_t *hmap) {
+	for (size_t n = 0; n < hmap->size; ++n)
+		bwvec_close(hmap->data[n]);
+	free(hmap->data);
+	free(hmap);
+}
 
 // tokenizer
 
@@ -255,9 +330,11 @@ typedef struct s_bw_html {
 	bw_htmlprop_t *props;
 	struct s_bw_html *parent;
 	struct s_bw_html **children;
+	struct s_bw_html *root;
+	bwhmap_t *map;
 } bw_html_t;
 
-bw_html_t *bw_nodenew(char const *type) {
+static bw_html_t *bw_nodenew(char const *type) {
 	bw_html_t *node = malloc(sizeof(bw_html_t));
 
 	if (node == NULL)
@@ -285,6 +362,8 @@ bw_html_t *bw_nodenew(char const *type) {
 	}
 	node->parent = NULL;
 	node->data = NULL;
+	node->root = node;
+	node->map = NULL;
 	return node;
 }
 
@@ -292,6 +371,7 @@ static void bw_nodeadopt(bw_html_t *node, bw_html_t *child) {
 	if (child == NULL)
 		return;
 	child->parent = node;
+	child->root = node->root;
 	(void)bwvec_pushptr(&node->children, child);
 }
 
@@ -322,12 +402,13 @@ static int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
 		return -1;
 	tmp = (**toks).arg;
 	*toks += 2;
-	if (bw_parsestringelem(&prop, toks) == -1)
+	if (bw_parsestringelem(&prop, toks) == -1) {
 		if ((*toks)[0].tok == TOKSYM) {
 			prop.value = strdup((*toks)[0].arg);
 			++*toks;
 		} else
 			return -1; // error: not string/sym
+	}
 	prop.key = strdup(tmp);
 	(void)bwvec_pushdata(&node->props, &prop);
 	return 0;
@@ -336,15 +417,17 @@ static int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
 // bloc ::= TOKOPEN TOKSYM [<keyval>] TOKCLOSE
 static int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks, int *in) {
 	bw_html_t *child;
+	_Bool x;
 
 	if ((*toks)[0].tok != TOKOPEN || (*toks)[1].tok != TOKSYM)
 		return -1;
 	child = bw_nodenew((*toks)[1].arg);
 	*toks += 2;
 	while (bw_parsekeyval(child, toks) == 0);
-	if ((**toks).tok == TOKSLASH) {
+	x = (**toks).tok == TOKSLASH;
+	if (x || bwhmap_get(node->root->map, child->type) != NULL) {
 		*in = 0;
-		++*toks;
+		*toks += x;
 	}
 	if ((**toks).tok != TOKCLOSE) {
 		bw_htmlclose(child);
@@ -381,7 +464,6 @@ static int bw_parseuseless(bw_tokenarg_t const **args) {
 // something ::= TOKSYM | <endbloc> | <bloc>
 static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 	int go_in = 1;
-	bw_html_t *innode;
 
 	if ((**toks).tok == TOKEND)
 		return 0;
@@ -399,11 +481,9 @@ static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
 		return bw_parsesomething(node, toks);
 	if (bw_parseendbloc(node, toks) == 0)
 		return bw_parsesomething(node->parent, toks);
-	if (bw_parsebloc(node, toks, &go_in) == 0) {
-		innode = go_in ?
-			node->children[bwvec_size(node->children) - 1] : node;
-		return bw_parsesomething(innode, toks);
-	}
+	if (bw_parsebloc(node, toks, &go_in) == 0)
+		return bw_parsesomething(go_in ?
+			node->children[bwvec_size(node->children) - 1] : node, toks);
 	printf("[failed to in %s, last token is %s, with arg %s.]\n", node->type ? node->type : "root", TOK2STR_MAP[(**toks).tok], (**toks).arg ? (**toks).arg : "null");
 	return -1;
 }
@@ -414,7 +494,12 @@ static bw_html_t *bw_gethtmlfromtokens(bw_tokenarg_t const *toks) {
 
 	if (root == NULL)
 		return NULL;
-	display_tokens(toks);
+	//display_tokens(toks);
+	root->map = BWHMAP_NEW(20);
+	bwhmap_set(root->map, "br", 1);
+	bwhmap_set(root->map, "meta", 1);
+	bwhmap_set(root->map, "img", 1);
+	bwhmap_set(root->map, "input", 1);
 	res = bw_parsesomething(root, &toks);
 	printf("Result is %d\n", res);
 	//if (res == -1) {
@@ -453,7 +538,7 @@ bw_html_t *bw_htmlfromtext(char const *htmltext) {
 	for (size_t n = 0; n < size; ++n)
 		if (tokens[n].tok == TOKSYM && tokens[n].arg != NULL)
 			free(tokens[n].arg);
-	bwvec_close(tokens);
+			bwvec_close(tokens);
 	return html;
 }
 
@@ -479,6 +564,8 @@ void bw_htmlclose(bw_html_t *node) {
 	bwvec_close(node->props);
 	if (node->type != NULL)
 		free(node->type);
+	if (node->map != NULL)
+		bwhmap_close(node->map);
 	size = bwvec_size(node->children);
 	for (size_t n = 0; n < size; ++n)
 		bw_htmlclose(node->children[n]);
@@ -491,7 +578,7 @@ void bw_htmlclose(bw_html_t *node) {
 // main
 
 int main(void) {
-	bw_html_t *html = bw_htmlfromfile("google-really-compliant.html");
+	bw_html_t *html = bw_htmlfromfile("example.html");
 
 	if (html == NULL)
 		return 1;
