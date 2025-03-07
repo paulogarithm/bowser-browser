@@ -234,14 +234,17 @@ static bw_tokenarg_t *bw_gettokensfromstring(char const *html) {
 				in = true;
 				break;
 			case '>':
-				actual = TOKCLOSE;
-				in = false;
+				if (!in)
+					(void)bwvec_pushnum(&buf, *html);
+				else {
+					actual = TOKCLOSE;
+					in = false;
+				}
 				break;
 			case '=':
 			case '"':
 			case '/':
 			case '!':
-				// c'est un token si c'est à linterieur + pas dans une string || 
 				if ((in && !instr) || (in && *html == '"'))
 					actual = CHAR2TOK_MAP[(int)*html];
 				else
@@ -324,6 +327,10 @@ typedef struct {
 	char *value;
 } bw_htmlprop_t;
 
+typedef struct {
+	bwhmap_t *singlemap;
+} bw_htmlcommondata_t;
+
 typedef struct s_bw_html {
 	char *type;
 	char *data;
@@ -331,7 +338,7 @@ typedef struct s_bw_html {
 	struct s_bw_html *parent;
 	struct s_bw_html **children;
 	struct s_bw_html *root;
-	bwhmap_t *map;
+	bw_htmlcommondata_t *common;
 } bw_html_t;
 
 static bw_html_t *bw_nodenew(char const *type) {
@@ -363,8 +370,27 @@ static bw_html_t *bw_nodenew(char const *type) {
 	node->parent = NULL;
 	node->data = NULL;
 	node->root = node;
-	node->map = NULL;
+	node->common = NULL;
 	return node;
+}
+
+static int bw_commoninit(bw_html_t *node) {
+	node->common = malloc(sizeof(bw_htmlcommondata_t));
+	if (node->common == NULL)
+		return -1;
+	node->common->singlemap = BWHMAP_NEW(8);
+	if (node->common->singlemap == NULL)
+		return -1;
+	bwhmap_set(node->common->singlemap, "br", 1);
+	bwhmap_set(node->common->singlemap, "meta", 1);
+	bwhmap_set(node->common->singlemap, "img", 1);
+	bwhmap_set(node->common->singlemap, "input", 1);
+	return 0;
+}
+
+static void bw_commondestroy(bw_htmlcommondata_t *data) {
+	bwhmap_close(data->singlemap);
+	free(data);
 }
 
 static void bw_nodeadopt(bw_html_t *node, bw_html_t *child) {
@@ -372,6 +398,7 @@ static void bw_nodeadopt(bw_html_t *node, bw_html_t *child) {
 		return;
 	child->parent = node;
 	child->root = node->root;
+	child->common = node->root->common;
 	(void)bwvec_pushptr(&node->children, child);
 }
 
@@ -425,7 +452,7 @@ static int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks, int *in) {
 	*toks += 2;
 	while (bw_parsekeyval(child, toks) == 0);
 	x = (**toks).tok == TOKSLASH;
-	if (x || bwhmap_get(node->root->map, child->type) != NULL) {
+	if (x || bwhmap_get(node->common->singlemap, child->type) != NULL) {
 		*in = 0;
 		*toks += x;
 	}
@@ -495,11 +522,8 @@ static bw_html_t *bw_gethtmlfromtokens(bw_tokenarg_t const *toks) {
 	if (root == NULL)
 		return NULL;
 	//display_tokens(toks);
-	root->map = BWHMAP_NEW(20);
-	bwhmap_set(root->map, "br", 1);
-	bwhmap_set(root->map, "meta", 1);
-	bwhmap_set(root->map, "img", 1);
-	bwhmap_set(root->map, "input", 1);
+	if (bw_commoninit(root) == -1)
+		return NULL;
 	res = bw_parsesomething(root, &toks);
 	printf("Result is %d\n", res);
 	//if (res == -1) {
@@ -524,7 +548,7 @@ static void bw_display_tree(bw_html_t const *tree, int off) {
 		bw_display_tree(tree->children[n], off + 1);
 }
 
-// api
+// html api
 
 bw_html_t *bw_htmlfromtext(char const *htmltext) {
 	bw_tokenarg_t *tokens = bw_gettokensfromstring(htmltext);
@@ -538,7 +562,7 @@ bw_html_t *bw_htmlfromtext(char const *htmltext) {
 	for (size_t n = 0; n < size; ++n)
 		if (tokens[n].tok == TOKSYM && tokens[n].arg != NULL)
 			free(tokens[n].arg);
-			bwvec_close(tokens);
+	bwvec_close(tokens);
 	return html;
 }
 
@@ -555,6 +579,7 @@ bw_html_t *bw_htmlfromfile(char const *path) {
 
 void bw_htmlclose(bw_html_t *node) {
 	size_t size = bwvec_size(node->props);
+	static bool commonhasbeenclosed = false;
 
 	for (size_t n = 0; n < size; ++n) {
 		free(node->props[n].key);
@@ -564,8 +589,10 @@ void bw_htmlclose(bw_html_t *node) {
 	bwvec_close(node->props);
 	if (node->type != NULL)
 		free(node->type);
-	if (node->map != NULL)
-		bwhmap_close(node->map);
+	if (!commonhasbeenclosed && node->common != NULL) {
+		bw_commondestroy(node->common);
+		commonhasbeenclosed = true;
+	}
 	size = bwvec_size(node->children);
 	for (size_t n = 0; n < size; ++n)
 		bw_htmlclose(node->children[n]);
