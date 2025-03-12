@@ -105,23 +105,24 @@ int bwvec_extend(void *vptr, void *membs, size_t moremembs) {
 // hashmap
 
 typedef struct {
-	char const *key;
-	size_t value;
+	char *key;
+	void *value;
 } bwhmap_keyval_t;
 
 typedef struct s_bwhmap {
-	//size_t keysize;
-	//size_t valuesize;
+	// size_t keysize;
+	size_t valuesize;
 	size_t size;
 	bwhmap_keyval_t **data;
+	bool empty;
 	size_t(*hashfunc)(char const *, size_t, size_t);
 } bwhmap_t;
 
 //#define BWHMAP_NEW(kt, vt, n) bwhmap_init(sizeof(kt), sizeof(vt), n, bwhmap_hashadler32)
-#define BWHMAP_NEW(n) bwhmap_init(n, bwhmap_hashadler32)
+#define BWHMAP_NEW(t, n) bwhmap_init(n, bwhmap_hashadler32, sizeof(t))
 //#define BWHMAP_HASHKEY(hmap, key) ((hmap)->hashfunc(key, (hmap)->keysize, (hmap)->size)) 
 
-bwhmap_t *bwhmap_init(size_t size, size_t(*f)(char const *, size_t, size_t)) {
+bwhmap_t *bwhmap_init(size_t size, size_t(*f)(char const *, size_t, size_t), size_t valuesize) {
 	bwhmap_t *map = malloc(sizeof(bwhmap_t));
 
 	if (map == NULL)
@@ -130,9 +131,10 @@ bwhmap_t *bwhmap_init(size_t size, size_t(*f)(char const *, size_t, size_t)) {
 	for (size_t n = 0; n < size; ++n)
 		map->data[n] = BWVEC_NEW(bwhmap_keyval_t);
 	//map->keysize = keysize;
-	//map->valuesize = valuesize;
+	map->valuesize = valuesize;
 	map->size = size;
 	map->hashfunc = f;
+	map->empty = true;
 	return map;
 }
 
@@ -148,32 +150,65 @@ size_t bwhmap_hashadler32(char const *key, size_t keysize, size_t hmapsize) {
 	return (size_t)((s2 << 16) | s1) % hmapsize;
 }
 
-void bwhmap_set(bwhmap_t *hmap, char const *key, size_t value) {
-	bwhmap_keyval_t const keyval = { .key = key, .value = value };
+void bwhmap_set(bwhmap_t *hmap, char const *key, void *value) {
+	bwhmap_keyval_t keyval = { .key = NULL, .value = NULL };
 	bwhmap_keyval_t *list = hmap->data[hmap->hashfunc(key, strlen(key), hmap->size)];
 	size_t const size = bwvec_size(list);
 
-	for (size_t n = 0; n < size; ++n)
-		if (strcmp(list[n].key, key) == 0) {
-			list[n].value = value;
+	hmap->empty = false;
+	for (size_t n = 0; n < size; ++n) {
+		if (!strcmp(list[n].key, key)) {
+			(void)memcpy(list[n].value, value, hmap->valuesize);
 			return;
 		}
+	}
+	keyval.key = strdup(key);
+	if (keyval.key == NULL)
+		return;
+	keyval.value = malloc(hmap->valuesize);
+	if (keyval.value == NULL) {
+		free(keyval.key);
+		return;
+	}
+	(void)memcpy(keyval.value, value, hmap->valuesize);
 	(void)bwvec_pushdata(&list, &keyval);
 }
 
-size_t *bwhmap_get(bwhmap_t *hmap, void const *key) {
+void *bwhmap_get(bwhmap_t *hmap, void const *key) {
 	bwhmap_keyval_t *list = hmap->data[hmap->hashfunc(key, strlen(key), hmap->size)];
 	size_t size = bwvec_size(list);
 
 	for (size_t n = 0; n < size; ++n)
 		if (strcmp(list[n].key, key) == 0)
-			return &list[n].value;
+			return list[n].value;
 	return NULL;
 }
 
-void bwhmap_close(bwhmap_t *hmap) {
-	for (size_t n = 0; n < hmap->size; ++n)
+bool bwhmap_empty(bwhmap_t const *hmap) {
+	return hmap->empty;
+}
+
+typedef void(*bwhmap_gc_t)(void *);
+
+void bwhmap_close(bwhmap_t *hmap, bwhmap_gc_t gcptrfunc) {
+	size_t size;
+
+	for (size_t n = 0; n < hmap->size; ++n) {
+		size = bwvec_size(hmap->data[n]);
+		if (gcptrfunc != NULL) {
+			for (size_t i = 0; i < size; ++i) {
+				gcptrfunc(*(void **)hmap->data[n][i].value);
+				free(hmap->data[n][i].key);
+				free(hmap->data[n][i].value);
+			}
+		} else {
+			for (size_t i = 0; i < size; ++i) {
+				free(hmap->data[n][i].key);
+				free(hmap->data[n][i].value);
+			}
+		}
 		bwvec_close(hmap->data[n]);
+	}
 	free(hmap->data);
 	free(hmap);
 }
@@ -323,18 +358,13 @@ static void display_tokens(bw_tokenarg_t const *args) {
 // parser
 
 typedef struct {
-	char *key;
-	char *value;
-} bw_htmlprop_t;
-
-typedef struct {
 	bwhmap_t *singlemap;
 } bw_htmlcommondata_t;
 
 typedef struct s_bw_html {
 	char *type;
 	char *data;
-	bw_htmlprop_t *props;
+	bwhmap_t *props;
 	struct s_bw_html *parent;
 	struct s_bw_html **children;
 	struct s_bw_html *root;
@@ -360,7 +390,7 @@ static bw_html_t *bw_nodenew(char const *type) {
 		free(node);
 		return NULL;
 	}
-	node->props = BWVEC_NEW(bw_htmlprop_t);
+	node->props = BWHMAP_NEW(char *, 10);
 	if (node->props == NULL) {
 		bwvec_close(node->children);
 		free(node->type);
@@ -375,21 +405,23 @@ static bw_html_t *bw_nodenew(char const *type) {
 }
 
 static int bw_commoninit(bw_html_t *node) {
+	int n = 1;
+
 	node->common = malloc(sizeof(bw_htmlcommondata_t));
 	if (node->common == NULL)
 		return -1;
-	node->common->singlemap = BWHMAP_NEW(8);
+	node->common->singlemap = BWHMAP_NEW(int, 8);
 	if (node->common->singlemap == NULL)
 		return -1;
-	bwhmap_set(node->common->singlemap, "br", 1);
-	bwhmap_set(node->common->singlemap, "meta", 1);
-	bwhmap_set(node->common->singlemap, "img", 1);
-	bwhmap_set(node->common->singlemap, "input", 1);
+	bwhmap_set(node->common->singlemap, "br", &n);
+	bwhmap_set(node->common->singlemap, "meta", &n);
+	bwhmap_set(node->common->singlemap, "img", &n);
+	bwhmap_set(node->common->singlemap, "input", &n);
 	return 0;
 }
 
 static void bw_commondestroy(bw_htmlcommondata_t *data) {
-	bwhmap_close(data->singlemap);
+	bwhmap_close(data->singlemap, NULL);
 	free(data);
 }
 
@@ -405,9 +437,9 @@ static void bw_nodeadopt(bw_html_t *node, bw_html_t *child) {
 void bw_htmlclose(bw_html_t *node);
 
 // stringelem ::= TOKQUOTE TOKSYM TOKQUOTE
-static int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
+static int bw_parsestringelem(char **data, bw_tokenarg_t const **toks) {
 	if ((*toks)[0].tok == TOKQUOTE && (*toks)[1].tok == TOKQUOTE) {
-		prop->value = NULL;
+		*data = NULL;
 		*toks += 2;
 		return 0;
 	}
@@ -415,36 +447,35 @@ static int bw_parsestringelem(bw_htmlprop_t *prop, bw_tokenarg_t const **toks) {
 			(*toks)[1].tok != TOKSYM ||
 			(*toks)[2].tok != TOKQUOTE)
 		return -1;
-	prop->value = strdup((*toks)[1].arg);
+	*data = strdup((*toks)[1].arg);
 	*toks += 3;
 	return 0;
 }
 
 // keyval ::= TOKSYM TOKEQUAL (<stringelem> | TOKSYM)
 static int bw_parsekeyval(bw_html_t *node, bw_tokenarg_t const **toks) {
-	bw_htmlprop_t prop;
-	char *tmp;
+	char *key;
+	char *data;
 
 	if ((*toks)[0].tok != TOKSYM || (*toks)[1].tok != TOKEQUAL)
 		return -1;
-	tmp = (**toks).arg;
+	key = (**toks).arg;
 	*toks += 2;
-	if (bw_parsestringelem(&prop, toks) == -1) {
+	if (bw_parsestringelem(&data, toks) == -1) {
 		if ((*toks)[0].tok == TOKSYM) {
-			prop.value = strdup((*toks)[0].arg);
+			data = strdup((*toks)[0].arg);
 			++*toks;
 		} else
 			return -1; // error: not string/sym
 	}
-	prop.key = strdup(tmp);
-	(void)bwvec_pushdata(&node->props, &prop);
+	bwhmap_set(node->props, key, &data);
 	return 0;
 }
 
 // bloc ::= TOKOPEN TOKSYM [<keyval>] TOKCLOSE
 static int bw_parsebloc(bw_html_t *node, bw_tokenarg_t const **toks, int *in) {
 	bw_html_t *child;
-	_Bool x;
+	bool x;
 
 	if ((*toks)[0].tok != TOKOPEN || (*toks)[1].tok != TOKSYM)
 		return -1;
@@ -487,6 +518,11 @@ static int bw_parseuseless(bw_tokenarg_t const **args) {
 	++*args;
 	return 0;
 }
+
+/*struct foo {
+	struct foo *self;
+	method()
+};*/
 
 // something ::= TOKSYM | <endbloc> | <bloc>
 static int bw_parsesomething(bw_html_t *node, bw_tokenarg_t const **toks) {
@@ -541,8 +577,8 @@ static void bw_display_tree(bw_html_t const *tree, int off) {
 	printf("%s:", tree->type ? tree->type : "root");
 	if (tree->data)
 		printf(" (...)");//, tree->data);
-	if (!bwvec_empty(tree->props))
-		printf(" [%zu props]", bwvec_size(tree->props));
+	if (!bwhmap_empty(tree->props))
+		printf(" [%zu props]", tree->props->size);
 	puts("");
 	for (size_t n = 0; n < size; ++n)
 		bw_display_tree(tree->children[n], off + 1);
@@ -578,15 +614,10 @@ bw_html_t *bw_htmlfromfile(char const *path) {
 }
 
 void bw_htmlclose(bw_html_t *node) {
-	size_t size = bwvec_size(node->props);
+	size_t size;
 	static bool commonhasbeenclosed = false;
 
-	for (size_t n = 0; n < size; ++n) {
-		free(node->props[n].key);
-		if (node->props[n].value != NULL)
-			free(node->props[n].value);
-	}
-	bwvec_close(node->props);
+	bwhmap_close(node->props, free);
 	if (node->type != NULL)
 		free(node->type);
 	if (!commonhasbeenclosed && node->common != NULL) {
@@ -602,14 +633,281 @@ void bw_htmlclose(bw_html_t *node) {
 	free(node);
 }
 
+// css tokenizer
+
+typedef enum {
+	CTOK_END,
+	CTOK_SYM,		// body
+	CTOK_OPEN,		// {
+	CTOK_CLOSE,		// }
+	CTOK_PAROPEN,	// (
+	CTOK_PARCLOSE,	// )
+	CTOK_DOT,		// .
+	CTOK_HASHTAG,	// #
+	CTOK_COLON,		// :
+	CTOK_COMMA,		// ,
+	CTOK_STRING,	// "foo"
+	CTOK_SEMICOLON, // ;
+} css_token_t;
+
+typedef struct {
+	char *data;
+	css_token_t token;
+} css_tokenpair_t;
+
+static css_token_t const CHAR2CSSTOK_MAP[] = {
+	['{'] = CTOK_OPEN,
+	['}'] = CTOK_CLOSE,
+	['('] = CTOK_PAROPEN,
+	[')'] = CTOK_PARCLOSE,
+	[':'] = CTOK_COLON,
+	['#'] = CTOK_HASHTAG,
+	['.'] = CTOK_DOT,
+	[';'] = CTOK_SEMICOLON,
+	[','] = CTOK_COMMA,
+};
+
+static char const *const CSSTOK2STR_MAP[] = {
+	[CTOK_CLOSE] = "}",
+	[CTOK_OPEN] = "{",
+	[CTOK_PARCLOSE] = ")",
+	[CTOK_PAROPEN] = "(",
+	[CTOK_COLON] = ":",
+	[CTOK_HASHTAG] = "#",
+	[CTOK_DOT] = ".",
+	[CTOK_SEMICOLON] = ";",
+	[CTOK_COMMA] = ",",
+	[CTOK_SYM] = "SYMBOL",
+	[CTOK_END] = "END",
+	[CTOK_STRING] = "STRING",
+};
+
+static css_tokenpair_t *css_getvectoroftokens(char const *css) {
+	char *str = BWVEC_NEW(char);
+	bool instr = false;
+	css_tokenpair_t pair;
+	css_tokenpair_t *pairs = BWVEC_NEW(css_tokenpair_t);
+
+	for (; *css != '\0'; ++css) {
+		pair.token = CTOK_END;
+		switch (*css) {
+			case ' ':
+			case '\n':
+			case '\t':
+				if (!bwvec_empty(str)) {
+					if (!instr)
+						pair.token = CTOK_SYM;
+					else
+						(void)bwvec_pushnum(&str, *css);
+				}
+				break;
+			case '{':
+			case '(':
+			case ')':
+			case '}':
+			case '#':
+			case '.':
+			case ',':
+			case ':':
+			case ';':
+				if (!bwvec_empty(str)) {
+					pair.token =  instr ? CTOK_STRING : CTOK_SYM;
+					--css;
+					break;
+				}
+				if (instr)
+					(void)bwvec_pushnum(&str, *css);
+				else
+					pair.token = CHAR2CSSTOK_MAP[*css];
+				break;
+			case '"':
+				if (!instr && !bwvec_empty(str))
+					pair.token = CTOK_SYM;
+				instr = !instr;
+				if (!instr)
+					pair.token = CTOK_STRING;
+				break;
+			default:
+				(void)bwvec_pushnum(&str, *css);
+				break;
+		}
+		if (pair.token == CTOK_END)
+			continue;
+		if (pair.token == CTOK_SYM || pair.token == CTOK_STRING)
+			pair.data = strndup(str, bwvec_size(str));
+		else
+			pair.data = NULL;
+		(void)bwvec_pushdata(&pairs, &pair);
+		bwvec_reset(str);
+	}
+	pair.token = CTOK_END;
+	(void)bwvec_pushdata(&pairs, &pair);
+	bwvec_close(str);
+	return pairs;
+}
+
+static void css_displaytoks(css_tokenpair_t const *args) {
+	size_t size = bwvec_size(args);
+
+	for (size_t n = 0; n < size; ++n) {
+		(void)printf("%s", CSSTOK2STR_MAP[args[n].token]);
+		if (args[n].token == CTOK_SYM || args[n].token == CTOK_STRING)
+			(void)printf("(%s)", args[n].data ? args[n].data : "(null)");
+		(void)printf(" ");
+	}
+	(void)puts("");
+}
+
+// css parsing
+
+typedef enum {
+	CSS_NUMBER,	// `10` or `3.14`
+	CSS_STRING,	// `hello` or `"Hello world"`
+	CSS_MESURE, // `10px` or `5em`
+	CSS_COLOR,	// `#ff00ff` or `rgba(...)`
+	CSS_TUPLE,	// stuff, stuff, ...
+	_CSS_ENDENUM,
+} css_type_t;
+
+typedef double css_number_t;
+
+typedef uint32_t css_color_t;
+
+typedef enum {
+	MESURE_PX, 		// px
+	MESURE_CM, 		// cm
+	MESURE_EM, 		// em
+	MESURE_REM, 	// rem
+	MESURE_PC, 		// %
+	MESURE_MM,		// mm
+	MESURE_IN,		// in
+	MESURE_CH,		// ch
+	MESURE_VW,		// vw
+	MESURE_VH,		// vh
+	MESURE_VMI,		// vmin
+	MESURE_VMA,		// vmax
+	_MESURE_ENDENUM
+} css_unitsize_t;
+
+static struct {
+	char const *str;
+	css_unitsize_t unit;
+} const STR2CSSUNIT_MAP[] = {
+	{"px", MESURE_PX},
+	{"cm", MESURE_CM},
+	{"em", MESURE_EM},
+	{"rem", MESURE_REM},
+	{"%", MESURE_PC},
+	{"mm", MESURE_MM},
+	{"in", MESURE_IN},
+	{"ch", MESURE_CH},
+	{"vw", MESURE_VW},
+	{"vh", MESURE_VH},
+	{"vmin", MESURE_VMI},
+	{"vmax", MESURE_VMA},
+	{NULL, 0}
+};
+
+typedef struct {
+	css_number_t num;
+	css_unitsize_t what;
+} css_mesure_t;
+
+static size_t const CSS_TYPESIZES[] = {
+	[CSS_NUMBER] = sizeof(css_number_t),
+	[CSS_STRING] = sizeof(char *),
+	[CSS_MESURE] = sizeof(css_mesure_t),
+	[CSS_COLOR] = 4,
+	[CSS_TUPLE] = sizeof(void *),
+};
+
+// element setup
+
+#define CSS_ELEMENTTYPE(x) (*((css_type_t *)(x) - 1))
+
+static void *css_elemnew(css_type_t type) {
+	css_type_t *all;
+	size_t s;
+
+	if (type >= _CSS_ENDENUM)
+		return NULL;
+	s = CSS_TYPESIZES[type];
+	all = malloc(sizeof(css_type_t) + s);
+	if (all == NULL)
+		return NULL;
+	*all = type;
+	++all;
+	return memset(all, 0, s);
+}
+
+static void *css_eleminit(css_type_t type, void *data) {
+	void *elem = css_elemnew(type);
+
+	if (elem == NULL)
+		return NULL;
+	return memcpy(elem, data, CSS_ELEMENTTYPE(elem));
+}
+
+static void css_elemclose(void *elem) {
+	free((css_type_t *)elem - 1);
+}
+
+// css parsing for real
+
+static void css_parse(bwhmap_t *map, char const *css) {
+	css_tokenpair_t *toks = css_getvectoroftokens(css);
+	css_mesure_t *mesure;
+
+	if (toks == NULL)
+		return;
+	css_displaytoks(toks);
+	for (size_t n = 0; n < bwvec_size(toks); ++n)
+		if (toks[n].token == CTOK_STRING || toks[n].token == CTOK_SYM)
+			free(toks[n].data);
+	bwvec_close(toks);
+	css_elemclose(mesure);
+}
+
+static void bw_gethtmlstylehelper(bwhmap_t *map, bw_html_t const *node) {
+	size_t nchildren;
+	char *type;
+
+	if (node->type == NULL || strcmp(node->type, "style"))
+		goto parsechildren;
+	type = bwhmap_get(node->props, "type");
+	if (type == NULL || strcmp(*(char **)type, "text/css"))
+		goto parsechildren;
+	css_parse(map, node->data);
+parsechildren:
+	nchildren = bwvec_size(node->children);
+	for (size_t n = 0; n < nchildren; ++n)
+		bw_gethtmlstylehelper(map, node->children[n]);
+}
+
+bwhmap_t *bw_stylefromhtml(bw_html_t const *html) {
+	bwhmap_t *hmap = BWHMAP_NEW(char *, 10);
+
+	if (hmap == NULL)
+		return NULL;
+	bw_gethtmlstylehelper(hmap, html);
+	return hmap;
+}
+
 // main
 
 int main(void) {
 	bw_html_t *html = bw_htmlfromfile("example.html");
+	bwhmap_t *stylemap;
 
 	if (html == NULL)
 		return 1;
 	bw_display_tree(html, 0);
+	stylemap = bw_stylefromhtml(html);
+	if (stylemap == NULL) {
+	 	bw_htmlclose(html);
+	 	return 1;
+	}
+	bwhmap_close(stylemap, NULL);
 	bw_htmlclose(html);
 	return 0;
 }
