@@ -856,7 +856,6 @@ static void css_elemclose(void *elem) {
 
 static void css_parse(bwhmap_t *map, char const *css) {
 	css_tokenpair_t *toks = css_getvectoroftokens(css);
-	css_mesure_t *mesure;
 
 	if (toks == NULL)
 		return;
@@ -865,7 +864,6 @@ static void css_parse(bwhmap_t *map, char const *css) {
 		if (toks[n].token == CTOK_STRING || toks[n].token == CTOK_SYM)
 			free(toks[n].data);
 	bwvec_close(toks);
-	css_elemclose(mesure);
 }
 
 static void bw_gethtmlstylehelper(bwhmap_t *map, bw_html_t const *node) {
